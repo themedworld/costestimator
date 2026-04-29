@@ -1,27 +1,24 @@
 import os
 import joblib
 import pandas as pd
-from fastapi import FastAPI, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from jose import jwt, JWTError
 
 load_dotenv()
 
 # =========================
-# MODELE RANDOM FOREST
+# CONFIG
 # =========================
 MODEL_PATH = os.getenv("MODEL_PATH", "./best_project_cost_model.pkl")
 ENCODERS_PATH = os.getenv("ENCODERS_PATH", "./encoders.pkl")
 
-JWT_SECRET = os.getenv("JWT_SECRET", "secret")
-JWT_ALGORITHM = "HS256"
-
 print("📁 MODEL:", MODEL_PATH)
 
-# load model
+# =========================
+# LOAD MODEL
+# =========================
 try:
     model = joblib.load(MODEL_PATH)
     print("✅ RandomForest chargé")
@@ -41,8 +38,7 @@ except Exception as e:
 # =========================
 # FASTAPI
 # =========================
-app = FastAPI(title="RandomForest Cost API")
-security = HTTPBearer(auto_error=False)
+app = FastAPI(title="Smart Cost API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,7 +48,7 @@ app.add_middleware(
 )
 
 # =========================
-# INPUT MODEL
+# INPUT
 # =========================
 class ProjectRequest(BaseModel):
     programmingLanguages: str
@@ -72,12 +68,36 @@ class ProjectRequest(BaseModel):
 
 
 # =========================
-# ENCODING FUNCTION
+# SAFE ENCODER
 # =========================
 def encode_input(df):
     for col in df.columns:
-        if col in encoders:
-            df[col] = encoders[col].transform(df[col].astype(str))
+
+        if col not in encoders:
+            continue
+
+        le = encoders[col]
+        values = []
+
+        for val in df[col].astype(str):
+
+            # gérer listes: Python C#
+            tokens = val.split()
+
+            encoded_tokens = []
+
+            for token in tokens:
+                if token in le.classes_:
+                    encoded_tokens.append(le.transform([token])[0])
+
+            # moyenne si plusieurs valeurs
+            if len(encoded_tokens) > 0:
+                values.append(sum(encoded_tokens) / len(encoded_tokens))
+            else:
+                values.append(-1)
+
+        df[col] = values
+
     return df
 
 
@@ -90,30 +110,29 @@ def predict_cost(project: ProjectRequest):
     if model is None:
         return {"error": "Model not loaded"}
 
-    feature_cols = [
-        "programmingLanguages","framework","database","serverDetails",
-        "architecture","apiIntegration","securityRequirements",
-        "devOpsRequirements","estimatedDurationDays","priority",
-        "businessImpact","teamSize","complexity","mainModules"
-    ]
+    try:
+        feature_cols = [
+            "programmingLanguages","framework","database","serverDetails",
+            "architecture","apiIntegration","securityRequirements",
+            "devOpsRequirements","estimatedDurationDays","priority",
+            "businessImpact","teamSize","complexity","mainModules"
+        ]
 
-    # dataframe
-    df = pd.DataFrame([project.dict()])[feature_cols]
+        df = pd.DataFrame([project.dict()])[feature_cols]
 
-    # encode
-    if encoders is not None:
-        df = encode_input(df)
+        if encoders is not None:
+            df = encode_input(df)
 
-    # prediction
-    pred = model.predict(df)[0]
+        pred = model.predict(df)[0]
+        pred = max(0, float(pred))
 
-    # sécurité anti négatif
-    pred = max(0, float(pred))
+        return {
+            "estimated_cost": round(pred, 2),
+            "currency": "DT"
+        }
 
-    return {
-        "estimated_cost": round(pred, 2),
-        "currency": "USD"
-    }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # =========================
@@ -125,3 +144,11 @@ def health():
         "model": "loaded" if model else "missing",
         "encoders": "loaded" if encoders else "missing"
     }
+
+
+# =========================
+# ROOT
+# =========================
+@app.get("/")
+def root():
+    return {"message": "API online"}
